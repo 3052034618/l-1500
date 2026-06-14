@@ -1,0 +1,20 @@
+{
+  "name": "terahertz-spectroscopy-platform",
+  "version": "1.0.0",
+  "description": "高精度太赫兹时域光谱模拟与材料参数提取平台",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
