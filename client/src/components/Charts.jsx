@@ -49,7 +49,7 @@ export function TimeDomainChart({ time, signal, reference, height = 300 }) {
 export function FrequencyDomainChart({ frequency, magnitude, phase, height = 300 }) {
   const halfLen = Math.floor(frequency.length / 2);
   const data = frequency.slice(0, halfLen).map((f, i) => ({
-    frequency: (f / 1e12).toFixed(3),
+    frequency: f.toFixed(3),
     magnitude: magnitude[i],
     phase: phase ? phase[i] : undefined
   }));
@@ -95,7 +95,7 @@ export function FrequencyDomainChart({ frequency, magnitude, phase, height = 300
 
 export function DielectricChart({ frequency, epsilonReal, epsilonImag, modelReal, modelImag, height = 350 }) {
   const data = frequency.slice(0, Math.floor(frequency.length / 2)).map((f, i) => ({
-    frequency: (f / 1e12).toFixed(3),
+    frequency: f.toFixed(3),
     '实部(实验)': epsilonReal[i],
     '虚部(实验)': epsilonImag[i],
     '实部(拟合)': modelReal ? modelReal[i] : undefined,
@@ -132,7 +132,7 @@ export function DielectricChart({ frequency, epsilonReal, epsilonImag, modelReal
 
 export function ResidualChart({ frequency, residuals, height = 200 }) {
   const data = frequency.slice(0, Math.floor(frequency.length / 2)).map((f, i) => ({
-    frequency: (f / 1e12).toFixed(3),
+    frequency: f.toFixed(3),
     residual: residuals[i]
   }));
 

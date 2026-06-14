@@ -33,10 +33,29 @@ class TaskManager {
     const id = uuidv4();
     const now = new Date().toISOString();
     
+    const materialId = data.materialId || `mat_${Date.now()}`;
+    const material = this.materialDatabase.get(materialId);
+    if (material && material.suspended) {
+      this.addNotification({
+        type: 'material_blocked',
+        level: 'critical',
+        message: `⚠️ 材料 [${data.materialName || material.name}] 处于暂停状态，已拒绝新任务创建。原因：${material.suspendReason || '连续参数偏差超阈值'}。请联系首席科学家复核。`,
+        taskName: data.name,
+        materialName: data.materialName || material.name,
+        materialId,
+        targetAudience: 'chief_scientist'
+      });
+      const err = new Error(`材料 ${data.materialName || material.name} 已被暂停：${material.suspendReason || '连续三次关键参数偏差超过15%，请联系首席科学家复核'}`);
+      err.code = 'MATERIAL_SUSPENDED';
+      err.materialId = materialId;
+      err.materialInfo = material;
+      throw err;
+    }
+    
     const task = {
       id,
       name: data.name || `任务_${id.slice(0, 8)}`,
-      materialId: data.materialId,
+      materialId,
       materialName: data.materialName,
       materialCategory: data.materialCategory || 'semiconductor',
       batchNumber: data.batchNumber,
@@ -206,7 +225,7 @@ class TaskManager {
 
   async stepModelFitting(task) {
     const fittingStartTime = Date.now();
-    const { frequency } = task.fftData;
+    const { frequency, magnitude, phase } = task.fftData;
     const freqHz = frequency.map(f => f * 1e12);
     
     const transferFunction = task.preprocessedData.transferFunction || task.fftData.signalFFT;
@@ -216,24 +235,35 @@ class TaskManager {
     const modelFunction = this.getModelFunction(task.currentModel);
     const idealResult = modelFunction(freqHz, idealParams);
     
-    const noiseLevel = 0.05;
+    const signalFeatures = this.extractSignalFeatures(task);
+    
     const epsilonReal = idealResult.epsilonReal.map((v, i) => {
       if (!isFinite(v)) return 0;
-      const noise = (Math.random() - 0.5) * 2 * noiseLevel * Math.abs(v);
-      const ripple = 0.02 * v * Math.sin(i * 0.05);
-      return v + noise + ripple;
+      const freqTHz = frequency[i];
+      const ripple = signalFeatures.magnitudeModulation * Math.sin(2 * Math.PI * freqTHz / Math.max(signalFeatures.peakFreqTHz, 0.1) + signalFeatures.phaseShift);
+      const noise = signalFeatures.noiseAmplitude * (Math.random() - 0.5) * 2;
+      const drift = signalFeatures.meanDrift * (freqTHz / Math.max(frequency[frequency.length - 1], 0.1));
+      const scaling = 1 + signalFeatures.amplitudeBias;
+      let value = (v + ripple * Math.abs(v) + drift * Math.abs(v)) * scaling + noise;
+      if (!isFinite(value)) value = v;
+      return value;
     });
+    
     const epsilonImag = idealResult.epsilonImag.map((v, i) => {
-      if (!isFinite(v) || v < 0) return 0;
-      const noise = (Math.random() - 0.5) * 2 * noiseLevel * Math.max(Math.abs(v), 0.01);
-      return Math.max(0, v + noise);
+      if (!isFinite(v) || v < 0) return 0.01;
+      const freqTHz = frequency[i];
+      const noise = signalFeatures.noiseAmplitude * 0.8 * Math.max(Math.abs(v), 0.05) * (Math.random() - 0.5) * 2;
+      const broaden = signalFeatures.widthFactor > 1 ? signalFeatures.widthFactor : 1;
+      let value = Math.max(0, v * broaden + noise);
+      if (!isFinite(value) || value < 0) value = 0.01;
+      return value;
     });
     
     if (epsilonReal.length > 1 && !isFinite(epsilonReal[0])) {
       epsilonReal[0] = epsilonReal[1];
     }
     if (epsilonImag.length > 1 && (!isFinite(epsilonImag[0]) || epsilonImag[0] === 0)) {
-      epsilonImag[0] = epsilonImag[1] || 0.01;
+      epsilonImag[0] = Math.max(epsilonImag[1] || 0.01, 0.01);
     }
     
     task.fftData.epsilonReal = epsilonReal;
@@ -242,41 +272,49 @@ class TaskManager {
     const initialParams = generateInitialParams(task.currentModel, task.materialCategory);
     
     const validRange = this.selectValidFrequencyRange(frequency, epsilonReal, epsilonImag);
+    const validFreqHz = freqHz.slice(validRange.startIdx, validRange.endIdx);
+    const validEpsReal = epsilonReal.slice(validRange.startIdx, validRange.endIdx);
+    const validEpsImag = epsilonImag.slice(validRange.startIdx, validRange.endIdx);
     
-    const fittedParams = {};
+    const lmResult = levenbergMarquardt(
+      validFreqHz,
+      validEpsReal,
+      validEpsImag,
+      task.currentModel,
+      initialParams,
+      { maxIterations: 80, tol: 1e-5 }
+    );
+    
+    const fittedParams = lmResult.params;
     const paramErrors = {};
     for (const key of Object.keys(idealParams)) {
-      const errorRatio = 0.02 + Math.random() * 0.03;
-      const error = idealParams[key] * errorRatio * (Math.random() > 0.5 ? 1 : -1);
-      fittedParams[key] = idealParams[key] + error;
-      paramErrors[key] = Math.abs(error / idealParams[key]);
+      const base = Math.abs(idealParams[key]) || 1;
+      paramErrors[key] = Math.min(1, Math.abs((fittedParams[key] - idealParams[key]) / base));
     }
     
-    const fittedResult = modelFunction(freqHz.slice(validRange.startIdx, validRange.endIdx), fittedParams);
+    const fittedResult = modelFunction(validFreqHz, fittedParams);
     
-    const residuals = validRange.epsilonReal.map((v, i) => {
+    const residuals = validEpsReal.map((v, i) => {
       const realDiff = v - fittedResult.epsilonReal[i];
-      const imagDiff = validRange.epsilonImag[i] - fittedResult.epsilonImag[i];
+      const imagDiff = validEpsImag[i] - fittedResult.epsilonImag[i];
       return Math.sqrt(realDiff * realDiff + imagDiff * imagDiff);
     });
     
-    const chiSquare = residuals.reduce((sum, r) => sum + r * r, 0) / residuals.length;
+    const chiSquare = residuals.reduce((sum, r) => sum + r * r, 0) / Math.max(residuals.length, 1);
     
-    const meanReal = validRange.epsilonReal.reduce((a, b) => a + b, 0) / validRange.epsilonReal.length;
-    const meanImag = validRange.epsilonImag.reduce((a, b) => a + b, 0) / validRange.epsilonImag.length;
+    const meanReal = validEpsReal.reduce((a, b) => a + b, 0) / validEpsReal.length;
+    const meanImag = validEpsImag.reduce((a, b) => a + b, 0) / validEpsImag.length;
     
     let ssTotalReal = 0, ssResidReal = 0;
     let ssTotalImag = 0, ssResidImag = 0;
-    for (let i = 0; i < validRange.epsilonReal.length; i++) {
-      ssTotalReal += (validRange.epsilonReal[i] - meanReal) ** 2;
-      ssResidReal += (validRange.epsilonReal[i] - fittedResult.epsilonReal[i]) ** 2;
-      ssTotalImag += (validRange.epsilonImag[i] - meanImag) ** 2;
-      ssResidImag += (validRange.epsilonImag[i] - fittedResult.epsilonImag[i]) ** 2;
+    for (let i = 0; i < validEpsReal.length; i++) {
+      ssTotalReal += (validEpsReal[i] - meanReal) ** 2;
+      ssResidReal += (validEpsReal[i] - fittedResult.epsilonReal[i]) ** 2;
+      ssTotalImag += (validEpsImag[i] - meanImag) ** 2;
+      ssResidImag += (validEpsImag[i] - fittedResult.epsilonImag[i]) ** 2;
     }
-    const rSquaredReal = 1 - ssResidReal / ssTotalReal;
-    const rSquaredImag = 1 - ssResidImag / ssTotalImag;
-    
-    const iterations = 15 + Math.floor(Math.random() * 20);
+    const rSquaredReal = ssTotalReal > 0 ? 1 - ssResidReal / ssTotalReal : 0.99;
+    const rSquaredImag = ssTotalImag > 0 ? 1 - ssResidImag / ssTotalImag : 0.99;
     
     const fullFittedResult = modelFunction(freqHz, fittedParams);
     
@@ -304,11 +342,23 @@ class TaskManager {
       rSquaredImag,
       residuals: fullResiduals,
       modelResult: fullFittedResult,
-      iterations,
-      paramErrors
+      iterations: lmResult.iterations,
+      paramErrors,
+      signalFeatures
     };
     
     const monitorResult = taskMonitor.monitorFitting(task, fittingResult);
+    
+    monitorResult.warnings.forEach(w => {
+      this.addNotification({
+        type: w.type,
+        level: w.level,
+        message: `[${task.name}] ${w.message}`,
+        taskId: task.id,
+        taskName: task.name,
+        materialName: task.materialName
+      });
+    });
     
     const fittingEntry = {
       model: task.currentModel,
@@ -328,15 +378,68 @@ class TaskManager {
     task.fittingTime = Date.now() - fittingStartTime;
     
     if (monitorResult.hasCritical) {
-      stateMachine.transition(task, 'fail');
+      if (stateMachine.canTransition(task.status, 'fail')) {
+        stateMachine.transition(task, 'fail');
+      }
       task.updatedAt = new Date().toISOString();
       throw new Error('Fitting failed: critical quality issues detected');
     } else {
-      stateMachine.transition(task, 'complete');
+      if (stateMachine.canTransition(task.status, 'complete')) {
+        stateMachine.transition(task, 'complete');
+      }
     }
     
     task.updatedAt = new Date().toISOString();
     return task;
+  }
+  
+  extractSignalFeatures(task) {
+    const { magnitude, phase, frequency } = task.fftData;
+    const { denoisedSignal } = task.preprocessedData;
+    
+    let peakIdx = 0;
+    let peakMag = 0;
+    for (let i = 0; i < Math.floor(magnitude.length / 2); i++) {
+      if (magnitude[i] > peakMag) {
+        peakMag = magnitude[i];
+        peakIdx = i;
+      }
+    }
+    
+    const peakFreqTHz = frequency[peakIdx] || 1.0;
+    
+    const meanPhase = phase.slice(1, Math.floor(phase.length / 2)).reduce((a, b) => a + b, 0) / (Math.floor(phase.length / 2) - 1);
+    const phaseShift = isFinite(meanPhase) ? (meanPhase % Math.PI) / Math.PI : 0;
+    
+    const meanMag = magnitude.slice(1, Math.floor(magnitude.length / 2)).reduce((a, b) => a + b, 0) / Math.max(Math.floor(magnitude.length / 2) - 1, 1);
+    let magVar = 0;
+    for (let i = 1; i < Math.floor(magnitude.length / 2); i++) {
+      magVar += (magnitude[i] - meanMag) ** 2;
+    }
+    magVar = Math.sqrt(magVar / Math.max(Math.floor(magnitude.length / 2) - 1, 1));
+    const magnitudeModulation = Math.min(0.15, magVar / Math.max(meanMag, 1e-6));
+    
+    const signalMean = denoisedSignal.reduce((a, b) => a + b, 0) / denoisedSignal.length;
+    const signalStd = Math.sqrt(denoisedSignal.reduce((s, v) => s + (v - signalMean) ** 2, 0) / denoisedSignal.length);
+    const noiseAmplitude = Math.min(0.12, signalStd * 0.5);
+    
+    const firstHalf = denoisedSignal.slice(0, Math.floor(denoisedSignal.length / 2)).reduce((a, b) => a + b, 0) / Math.floor(denoisedSignal.length / 2);
+    const secondHalf = denoisedSignal.slice(Math.floor(denoisedSignal.length / 2)).reduce((a, b) => a + b, 0) / (denoisedSignal.length - Math.floor(denoisedSignal.length / 2));
+    const meanDrift = Math.min(0.1, (secondHalf - firstHalf) / Math.max(Math.abs(signalMean), 1e-6));
+    
+    const widthFactor = 0.8 + Math.random() * 0.4;
+    const amplitudeBias = (Math.random() - 0.5) * 0.1;
+    
+    return {
+      peakFreqTHz,
+      phaseShift,
+      magnitudeModulation,
+      noiseAmplitude,
+      meanDrift,
+      widthFactor,
+      amplitudeBias,
+      signalPeak: peakMag
+    };
   }
 
   async stepParameterExtraction(task) {
@@ -356,15 +459,58 @@ class TaskManager {
     const deviationCheck = taskMonitor.checkParameterDeviation(physicalParams, historical);
     
     if (deviationCheck.significantDeviation) {
-      task.warnings.push({
+      const devMsg = Object.entries(deviationCheck.deviations)
+        .map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`)
+        .join(', ');
+      const warn = {
         level: 'warning',
         type: 'parameter_deviation',
-        message: '参数与历史数据偏差较大',
+        message: `参数与历史数据偏差较大：${devMsg}`,
+        deviations: deviationCheck.deviations
+      };
+      task.warnings.push(warn);
+      this.addNotification({
+        type: 'parameter_deviation',
+        level: 'warning',
+        message: `[${task.name}] 参数偏差预警：${devMsg}`,
+        taskId: task.id,
+        taskName: task.name,
+        materialName: task.materialName,
+        materialId: task.materialId,
         deviations: deviationCheck.deviations
       });
     }
     
-    stateMachine.transition(task, 'complete');
+    const consecutiveDeviated = this.checkConsecutiveDeviations(task.materialId);
+    if (consecutiveDeviated) {
+      if (this.materialDatabase.has(task.materialId)) {
+        const mat = this.materialDatabase.get(task.materialId);
+        mat.suspended = true;
+        mat.suspendedAt = new Date().toISOString();
+        mat.suspendReason = '连续三次关键参数（载流子浓度、迁移率）偏差超过15%';
+      }
+      const suspendWarn = {
+        level: 'critical',
+        type: 'material_suspended',
+        message: `材料 ${task.materialName} 连续三次参数偏差超阈值，已暂停新任务分析，请通知首席科学家复核`,
+        materialId: task.materialId
+      };
+      task.warnings.push(suspendWarn);
+      this.addNotification({
+        type: 'material_suspended',
+        level: 'critical',
+        message: `⚠️ 首席科学家通知：材料 [${task.materialName}] 连续三次模拟的载流子浓度或迁移率偏差超过15%，新任务已自动暂停，请及时复核处理`,
+        taskId: task.id,
+        taskName: task.name,
+        materialName: task.materialName,
+        materialId: task.materialId,
+        targetAudience: 'chief_scientist'
+      });
+    }
+    
+    if (stateMachine.canTransition(task.status, 'complete')) {
+      stateMachine.transition(task, 'complete');
+    }
     task.updatedAt = new Date().toISOString();
     
     this.addHistoricalResult(task);
@@ -384,13 +530,43 @@ class TaskManager {
       reason: 'Analyst review'
     });
 
+    const oldApproval1 = task.approval1?.status;
+    const oldApproval2 = task.approval2?.status;
+    task.approval1 = { status: APPROVAL_STATUSES.PENDING, reviewer: null, comment: null, timestamp: null };
+    task.approval2 = { status: APPROVAL_STATUSES.PENDING, reviewer: null, comment: null, timestamp: null };
+
     task.currentModel = newModel;
     task.needsReview = false;
-    stateMachine.transition(task, 'retry_fitting');
+    task.warnings = task.warnings.filter(w => w.type === 'parameter_deviation');
     
-    this.stepModelFitting(task);
-    this.stepParameterExtraction(task);
-    
+    let transitionEvent = 'retry_fitting';
+    if (!stateMachine.canTransition(task.status, transitionEvent)) {
+      if (stateMachine.canTransition(task.status, 'retry')) {
+        transitionEvent = 'retry';
+      } else {
+        throw new Error(`Cannot retry fitting from state: ${task.status}`);
+      }
+    }
+    stateMachine.transition(task, transitionEvent);
+
+    task.updatedAt = new Date().toISOString();
+
+    setImmediate(async () => {
+      try {
+        await this.stepModelFitting(task);
+        await this.stepParameterExtraction(task);
+        task.totalTime = (task.totalTime || 0) + (task.fittingTime || 0);
+        if (stateMachine.canTransition(task.status, 'complete') && task.status !== TASK_STATES.COMPLETED) {
+          stateMachine.transition(task, 'complete');
+        }
+        task.completedAt = new Date().toISOString();
+      } catch (error) {
+        console.error('Retry fitting error:', error);
+        task.error = error.message;
+      }
+      task.updatedAt = new Date().toISOString();
+    });
+
     return task;
   }
 

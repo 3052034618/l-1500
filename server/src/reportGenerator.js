@@ -131,6 +131,11 @@ function addTimeDomainInfo(doc, task) {
        .text(`${label}:`, { continued: true, width: 140 })
        .fillColor('#666').text(value.toString());
   });
+
+  if (raw.time && raw.signal) {
+    doc.moveDown(0.5);
+    drawTimeDomainChart(doc, task);
+  }
 }
 
 function addFrequencyDomainInfo(doc, task) {
@@ -138,12 +143,12 @@ function addFrequencyDomainInfo(doc, task) {
   if (!fft) return;
 
   const validFreqRange = fft.frequency
-    ? `[${(fft.frequency[0] / 1e12).toFixed(3)}, ${(fft.frequency[Math.floor(fft.frequency.length / 2)] / 1e12).toFixed(3)}] THz`
+    ? `[${fft.frequency[0].toFixed(3)}, ${(fft.frequency[Math.floor(fft.frequency.length / 2)]).toFixed(3)}] THz`
     : 'N/A';
 
   const info = [
     ['频谱范围', validFreqRange],
-    ['频率分辨率', fft.frequency ? `${(fft.frequency[1] / 1e9).toFixed(3)} GHz` : 'N/A'],
+    ['频率分辨率', fft.frequency ? `${((fft.frequency[1] - fft.frequency[0]) * 1000).toFixed(3)} GHz` : 'N/A'],
     ['最大幅值', fft.magnitude ? Math.max(...fft.magnitude).toFixed(6) : 'N/A']
   ];
 
@@ -152,10 +157,16 @@ function addFrequencyDomainInfo(doc, task) {
        .text(`${label}:`, { continued: true, width: 140 })
        .fillColor('#666').text(value.toString());
   });
+
+  if (fft.frequency && fft.magnitude) {
+    doc.moveDown(0.5);
+    drawFrequencyDomainChart(doc, task);
+  }
 }
 
 function addDielectricInfo(doc, task) {
   const fft = task.fftData;
+  const fitting = task.fittingResults?.[task.fittingResults.length - 1];
   if (!fft || !fft.epsilonReal) return;
 
   const realStats = calculateStats(fft.epsilonReal);
@@ -173,6 +184,11 @@ function addDielectricInfo(doc, task) {
        .text(`${label}:`, { continued: true, width: 160 })
        .fillColor('#666').text(value.toString());
   });
+
+  if (fft.frequency && fft.epsilonReal) {
+    doc.moveDown(0.5);
+    drawDielectricChart(doc, task);
+  }
 }
 
 function addFittingResults(doc, task) {
@@ -320,4 +336,203 @@ function formatScientific(num) {
     return num.toExponential(4);
   }
   return num.toFixed(6);
+}
+
+function drawChartAxes(doc, x, y, width, height, xLabel, yLabel, xMin, xMax, yMin, yMax) {
+  doc.save();
+  doc.lineWidth(0.8);
+  doc.strokeColor('#333');
+  doc.moveTo(x, y - height).lineTo(x, y).stroke();
+  doc.moveTo(x, y).lineTo(x + width, y).stroke();
+  const ticks = 5;
+  doc.fontSize(7).fillColor('#666');
+  for (let i = 0; i <= ticks; i++) {
+    const tx = x + (width * i / ticks);
+    const ty = y - (height * i / ticks);
+    doc.moveTo(tx, y).lineTo(tx, y + 2).stroke();
+    doc.moveTo(x - 2, ty).lineTo(x, ty).stroke();
+    const xVal = xMin + (xMax - xMin) * i / ticks;
+    const yVal = yMin + (yMax - yMin) * i / ticks;
+    doc.text(xVal.toFixed(2), tx - 10, y + 4, { width: 25, align: 'center' });
+    doc.text(yVal.toFixed(2), x - 40, ty - 4, { width: 35, align: 'right' });
+  }
+  doc.fontSize(8).fillColor('#333');
+  doc.text(xLabel, x + width / 2 - 30, y + 16, { width: 60, align: 'center' });
+  doc.text(yLabel, x - 50, y - height / 2 - 10, { width: 40, align: 'center', lineGap: 2 });
+  doc.restore();
+}
+
+function drawCurve(doc, xData, yData, x, y, width, height, xMin, xMax, yMin, yMax, color) {
+  if (!xData || !yData || xData.length === 0) return;
+  const len = Math.min(xData.length, yData.length);
+  const sample = Math.max(1, Math.floor(len / 250));
+  doc.save();
+  doc.lineWidth(1.0);
+  doc.strokeColor(color);
+  let first = true;
+  const xRange = xMax - xMin || 1;
+  const yRange = yMax - yMin || 1;
+  for (let i = 0; i < len; i += sample) {
+    const xv = (xData[i] - xMin) / xRange;
+    let yv = (yData[i] - yMin) / yRange;
+    if (yv < -1000) yv = -1000;
+    if (yv > 1000) yv = 1000;
+    if (!isFinite(xv) || !isFinite(yv)) continue;
+    const px = x + Math.max(0, Math.min(width, xv * width));
+    const py = y - Math.max(0, Math.min(height, yv * height));
+    if (first) {
+      doc.moveTo(px, py);
+      first = false;
+    } else {
+      doc.lineTo(px, py);
+    }
+  }
+  doc.stroke();
+  doc.restore();
+}
+
+function drawLegend(doc, x, y, items) {
+  doc.save();
+  let cx = x;
+  items.forEach(({ color, label }) => {
+    doc.strokeColor(color).lineWidth(1.5).moveTo(cx, y + 4).lineTo(cx + 15, y + 4).stroke();
+    doc.fillColor('#333').fontSize(8).text(label, cx + 18, y, { width: 80 });
+    cx += 100;
+  });
+  doc.restore();
+}
+
+function drawTimeDomainChart(doc, task) {
+  const x = doc.x;
+  const y = doc.y + 5;
+  const width = 460;
+  const height = 130;
+  const raw = task.rawData;
+  const preprocessed = task.preprocessedData;
+  if (!raw || !raw.time) return;
+
+  const xMin = raw.time[0];
+  const xMax = raw.time[raw.time.length - 1];
+  let yMin = Math.min(...raw.signal);
+  let yMax = Math.max(...raw.signal);
+  if (preprocessed && preprocessed.denoisedSignal) {
+    yMin = Math.min(yMin, Math.min(...preprocessed.denoisedSignal));
+    yMax = Math.max(yMax, Math.max(...preprocessed.denoisedSignal));
+  }
+  const pad = (yMax - yMin) * 0.1;
+  yMin -= pad;
+  yMax += pad;
+
+  doc.save();
+  doc.roundedRect(x - 6, y - height - 20, width + 40, height + 45, 4)
+     .strokeColor('#ddd').lineWidth(0.5).stroke();
+  drawChartAxes(doc, x, y, width, height, '时间 (ps)', '幅值', xMin, xMax, yMin, yMax);
+  drawCurve(doc, raw.time, raw.signal, x, y, width, height, xMin, xMax, yMin, yMax, '#0369a1');
+  if (preprocessed && preprocessed.denoisedSignal) {
+    drawCurve(doc, raw.time, preprocessed.denoisedSignal, x, y, width, height, xMin, xMax, yMin, yMax, '#dc2626');
+    drawLegend(doc, x + 20, y - height - 12, [
+      { color: '#0369a1', label: '原始信号' },
+      { color: '#dc2626', label: '去噪后信号' }
+    ]);
+  } else {
+    drawLegend(doc, x + 20, y - height - 12, [
+      { color: '#0369a1', label: '时域信号' }
+    ]);
+  }
+  doc.fontSize(9).fillColor('#0369a1').text('图1 时域信号对比', x + width / 2 - 30, y + 30, { width: 60, align: 'center' });
+  doc.restore();
+  doc.y = y + 50;
+}
+
+function drawFrequencyDomainChart(doc, task) {
+  const x = doc.x;
+  const y = doc.y + 5;
+  const width = 460;
+  const height = 130;
+  const fft = task.fftData;
+  if (!fft || !fft.frequency || !fft.magnitude) return;
+
+  const half = Math.floor(fft.frequency.length / 2);
+  const freq = fft.frequency.slice(0, half);
+  const mag = fft.magnitude.slice(0, half);
+
+  const xMin = 0;
+  const xMax = freq[freq.length - 1];
+  let yMin = Math.min(...mag);
+  let yMax = Math.max(...mag);
+  const pad = (yMax - yMin) * 0.1;
+  yMin = Math.max(0, yMin - pad);
+  yMax += pad;
+
+  doc.save();
+  doc.roundedRect(x - 6, y - height - 20, width + 40, height + 45, 4)
+     .strokeColor('#ddd').lineWidth(0.5).stroke();
+  drawChartAxes(doc, x, y, width, height, '频率 (THz)', '幅值', xMin, xMax, yMin, yMax);
+  drawCurve(doc, freq, mag, x, y, width, height, xMin, xMax, yMin, yMax, '#059669');
+  drawLegend(doc, x + 20, y - height - 12, [
+    { color: '#059669', label: '频域幅值' }
+  ]);
+  doc.fontSize(9).fillColor('#0369a1').text('图2 频域幅值谱', x + width / 2 - 30, y + 30, { width: 60, align: 'center' });
+  doc.restore();
+  doc.y = y + 50;
+}
+
+function drawDielectricChart(doc, task) {
+  const x = doc.x;
+  const y = doc.y + 5;
+  const width = 460;
+  const height = 160;
+  const fft = task.fftData;
+  const fitting = task.fittingResults?.[task.fittingResults.length - 1];
+  if (!fft || !fft.frequency || !fft.epsilonReal) return;
+
+  const start = Math.floor(fft.frequency.length * 0.05);
+  const end = Math.floor(fft.frequency.length * 0.5);
+  const freq = fft.frequency.slice(start, end);
+  const real = fft.epsilonReal.slice(start, end);
+  const imag = (fft.epsilonImag || []).slice(start, end);
+
+  const xMin = freq[0];
+  const xMax = freq[freq.length - 1];
+  let yMin = Math.min(...real);
+  let yMax = Math.max(...real);
+  if (imag && imag.length) {
+    const imagClean = imag.filter(v => isFinite(v) && v < 1e6);
+    if (imagClean.length) {
+      yMin = Math.min(yMin, Math.min(...imagClean));
+      yMax = Math.max(yMax, Math.max(...imagClean));
+    }
+  }
+  const pad = (yMax - yMin) * 0.1;
+  yMin = Math.min(0, yMin - pad);
+  yMax += pad;
+
+  doc.save();
+  doc.roundedRect(x - 6, y - height - 20, width + 40, height + 45, 4)
+     .strokeColor('#ddd').lineWidth(0.5).stroke();
+  drawChartAxes(doc, x, y, width, height, '频率 (THz)', 'ε', xMin, xMax, yMin, yMax);
+  drawCurve(doc, freq, real, x, y, width, height, xMin, xMax, yMin, yMax, '#2563eb');
+  const imagClean = imag.map(v => (!isFinite(v) || v > 1e6) ? 0 : v);
+  drawCurve(doc, freq, imagClean, x, y, width, height, xMin, xMax, yMin, yMax, '#db2777');
+  if (fitting && fitting.fittedEpsilonReal && fitting.fittedEpsilonImag) {
+    const fittedReal = fitting.fittedEpsilonReal.slice(start, end);
+    const fittedImag = fitting.fittedEpsilonImag.slice(start, end);
+    drawCurve(doc, freq, fittedReal, x, y, width, height, xMin, xMax, yMin, yMax, '#7c3aed');
+    const fittedImagClean = fittedImag.map(v => (!isFinite(v) || v > 1e6) ? 0 : v);
+    drawCurve(doc, freq, fittedImagClean, x, y, width, height, xMin, xMax, yMin, yMax, '#ea580c');
+    drawLegend(doc, x + 5, y - height - 12, [
+      { color: '#2563eb', label: 'ε\' 实测' },
+      { color: '#db2777', label: 'ε\" 实测' },
+      { color: '#7c3aed', label: 'ε\' 拟合' },
+      { color: '#ea580c', label: 'ε\" 拟合' }
+    ]);
+  } else {
+    drawLegend(doc, x + 5, y - height - 12, [
+      { color: '#2563eb', label: 'ε\' 实部' },
+      { color: '#db2777', label: 'ε\" 虚部' }
+    ]);
+  }
+  doc.fontSize(9).fillColor('#0369a1').text('图3 复介电函数实部与虚部', x + width / 2 - 45, y + 30, { width: 90, align: 'center' });
+  doc.restore();
+  doc.y = y + 50;
 }

@@ -48,10 +48,15 @@ app.post('/api/tasks', async (req, res) => {
     let data = rawData;
     
     if (!data) {
+      const peakTime = 2 + Math.random() * 4;
+      const noiseLevel = 0.01 + Math.random() * 0.08;
+      const centerFreqTHz = 0.8 + Math.random() * 1.2;
       const synthetic = generateSyntheticTHzSignal({
         numPoints: 1024,
         timeStep: 0.05,
-        noiseLevel: 0.03
+        noiseLevel,
+        peakTime,
+        centerFreqTHz
       });
       data = {
         time: synthetic.time,
@@ -82,7 +87,16 @@ app.post('/api/tasks', async (req, res) => {
 
     res.status(201).json(sanitizeTask(task));
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    if (error.code === 'MATERIAL_SUSPENDED') {
+      res.status(423).json({
+        error: error.message,
+        code: error.code,
+        materialId: error.materialId,
+        materialInfo: error.materialInfo
+      });
+    } else {
+      res.status(400).json({ error: error.message, code: error.code });
+    }
   }
 });
 

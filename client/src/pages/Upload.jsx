@@ -73,14 +73,19 @@ function Upload() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    const task = await createTask({
-      ...formData,
-      thickness: formData.thickness / 1000,
-      rawData: uploadedData
-    });
-    
-    if (task) {
-      navigate(`/tasks/${task.id}`);
+    try {
+      const rawDataForBackend = uploadedData && uploadedData.generated ? null : uploadedData;
+      const task = await createTask({
+        ...formData,
+        thickness: formData.thickness / 1000,
+        rawData: rawDataForBackend
+      });
+      
+      if (task) {
+        navigate(`/tasks/${task.id}`);
+      }
+    } catch (error) {
+      alert(error.message || '创建任务失败');
     }
   };
 
@@ -89,6 +94,7 @@ function Upload() {
       ...prev,
       name: '示例分析任务_' + Date.now(),
       materialName: 'GaAs 砷化镓',
+      materialId: 'demo_GaAs_' + Math.floor(Math.random() * 10000),
       batchNumber: 'BATCH-2024001'
     }));
     setUploadedData({ generated: true });

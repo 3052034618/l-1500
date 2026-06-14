@@ -7,19 +7,27 @@ export function generateSyntheticTHzSignal(options = {}) {
     pulseWidth = 0.3,
     noiseLevel = 0.02,
     oscillations = 3,
-    decayRate = 2.0
+    decayRate = 2.0,
+    centerFreqTHz
   } = options;
 
   const time = [];
   const signal = [];
   const reference = [];
 
+  let oscFreq;
+  if (centerFreqTHz && centerFreqTHz > 0) {
+    oscFreq = centerFreqTHz * pulseWidth;
+  } else {
+    oscFreq = oscillations;
+  }
+
   for (let i = 0; i < numPoints; i++) {
     const t = i * timeStep;
     time.push(t);
     
     const envelope = Math.exp(-Math.pow((t - peakTime) / pulseWidth, 2));
-    const oscillation = Math.cos(2 * Math.PI * oscillations * (t - peakTime) / pulseWidth);
+    const oscillation = Math.cos(2 * Math.PI * oscFreq * (t - peakTime) / pulseWidth);
     const mainPulse = amplitude * envelope * oscillation;
     
     const lateDecay = t > peakTime ? Math.exp(-decayRate * (t - peakTime)) : 0;

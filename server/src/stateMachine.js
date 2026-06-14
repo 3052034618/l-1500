@@ -30,15 +30,18 @@ class StateMachine {
       },
       [TASK_STATES.COMPLETED]: {
         submit_approval: TASK_STATES.APPROVAL_1,
-        retry: TASK_STATES.MODEL_FITTING
+        retry: TASK_STATES.MODEL_FITTING,
+        retry_fitting: TASK_STATES.MODEL_FITTING
       },
       [TASK_STATES.APPROVAL_1]: {
         approve: TASK_STATES.APPROVAL_2,
-        reject: TASK_STATES.MODEL_FITTING
+        reject: TASK_STATES.MODEL_FITTING,
+        retry_fitting: TASK_STATES.MODEL_FITTING
       },
       [TASK_STATES.APPROVAL_2]: {
         approve: TASK_STATES.ARCHIVED,
-        reject: TASK_STATES.APPROVAL_1
+        reject: TASK_STATES.APPROVAL_1,
+        retry_fitting: TASK_STATES.MODEL_FITTING
       },
       [TASK_STATES.ABNORMAL]: {
         retry: TASK_STATES.PREPROCESSING,

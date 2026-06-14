@@ -36,7 +36,7 @@ const useStore = create((set, get) => ({
   },
 
   createTask: async (taskData) => {
-    set({ loading: true });
+    set({ loading: true, error: null });
     try {
       const res = await fetch('/api/tasks', {
         method: 'POST',
@@ -44,13 +44,24 @@ const useStore = create((set, get) => ({
         body: JSON.stringify(taskData)
       });
       const data = await res.json();
+      if (!res.ok) {
+        const err = new Error(data.error || '创建任务失败');
+        err.code = data.code;
+        err.materialId = data.materialId;
+        err.materialInfo = data.materialInfo;
+        set({ error: data.error, loading: false });
+        throw err;
+      }
       set((state) => ({
         tasks: [data, ...state.tasks],
         loading: false
       }));
       return data;
     } catch (error) {
-      set({ error: error.message, loading: false });
+      if (!set.getState().error) {
+        set({ error: error.message, loading: false });
+      }
+      throw error;
     }
   },
 

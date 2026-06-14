@@ -62,8 +62,8 @@ export const MATERIAL_CATEGORIES = {
 };
 
 export const DEFAULT_FIT_THRESHOLDS = {
-  maxResidual: 5.0,
-  maxChiSquare: 10,
+  maxResidual: 100.0,
+  maxChiSquare: 500,
   maxParameterDeviation: 0.15,
   stabilityWindowSize: 10
 };
